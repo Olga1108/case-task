@@ -254,3 +254,33 @@ class AnalysisResult:
     sensitivity: AnomalySensitivity
     seasonality: SeasonalitySummary
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LanguageResearchResult:
+    """Workflow state is independent of data completeness and evidence quality."""
+
+    language: str
+    project: str
+    article_title: str | None
+    mapping_status: str
+    status: Literal[
+        "mapping_unavailable", "retrieval_failed", "analysis_failed",
+        "no_data", "partial_data", "completed",
+    ]
+    pageviews: PageviewSeries | None = None
+    analysis: AnalysisResult | None = None
+    error: WikipediaError | None = None
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ResearchResult:
+    """Completed means all languages reached analysis, including no_data results."""
+
+    topic: ResolvedTopic
+    start_date: date
+    end_date: date
+    languages: list[LanguageResearchResult]
+    status: Literal["completed", "partial", "failed"]
+    warnings: list[str] = field(default_factory=list)
