@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wikipedia-interest"
 version = "0.1.0"
-description = "Skeleton for a Wikipedia pageview interest analysis skill"
+description = "Agent Skill for reproducible Wikipedia pageview interest research"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["httpx>=0.28,<1"]
+dependencies = ["httpx>=0.28,<1", "matplotlib>=3.9,<4"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
