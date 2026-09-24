@@ -1,31 +1,33 @@
-# Wikipedia Market Research Skill
+# Wikipedia Interest
 
-## Problem
+## Project purpose
 
-## Product assumptions
+An Agent Skill project for exploring Wikipedia pageview interest across topics
+and languages, with deterministic Python processing and a thin AI-agent
+orchestration layer. Product scope lives in [product_contract.md](product_contract.md).
 
-## Architecture
+## Current status
 
-## Why calculations are deterministic
+Skeleton only: an installable package, placeholder CLI and modules, and an import
+smoke test. The product contract currently contains headings awaiting definition.
+Data access, analysis, charts, reports, and the skill workflow are not implemented.
 
-## Topic resolution strategy
+## Local setup
 
-## Trend methodology
+Requires Python 3.12 or newer. From the repository root:
 
-## Confidence methodology
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+python -m pytest
+wikipedia-interest
+```
 
-## Cross-language comparison limitations
+## Planned high-level development stages
 
-## Agent Skill structure
-
-## Examples
-
-## Testing
-
-## Evaluation with a low-cost model
-
-## Known limitations
-
-## Future iterations
-
-## AI tools used during development
+1. Define and agree the product contract.
+2. Implement data retrieval and topic resolution.
+3. Implement deterministic analysis with tests.
+4. Add charts and concise shareable reports.
+5. Add and evaluate the Agent Skill orchestration workflow.
