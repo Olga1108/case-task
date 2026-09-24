@@ -3,12 +3,18 @@
 import httpx
 import pytest
 
+from wikipedia_interest import topic_resolver
 from wikipedia_interest.models import TopicCandidate, WikipediaError
 from wikipedia_interest.topic_resolver import (
     map_topic_languages, search_topic_candidates, validate_topic_candidate,
 )
 
 UA = "WikipediaInterestTests/0.1 (https://example.org/contact)"
+
+
+@pytest.fixture(autouse=True)
+def no_retry_wait(monkeypatch):
+    monkeypatch.setattr(topic_resolver.time, "sleep", lambda _: None)
 
 
 def page(title="Fasting", qid="Q123", language="en", **changes):
@@ -18,12 +24,13 @@ def page(title="Fasting", qid="Q123", language="en", **changes):
     return {"query": {"pages": [record | changes]}}
 
 
-def entity(languages=("pl", "cs")):
-    return {"entities": {"Q123": {"id": "Q123", "sitelinks": {
-        f"{language}wiki": {"site": f"{language}wiki", "title": f"Fasting {language}",
-                           "url": f"https://{language}.wikipedia.org/wiki/Fasting_{language}"}
+def langlinks(languages=("pl", "cs"), **changes):
+    record = {"pageid": 10, "ns": 0, "title": "Fasting", "langlinks": [
+        {"lang": language, "title": f"Fasting {language}",
+         "url": f"https://{language}.wikipedia.org/wiki/Fasting_{language}"}
         for language in languages
-    }}}}
+    ]}
+    return {"batchcomplete": True, "query": {"pages": [record | changes]}}
 
 
 def selected():
@@ -90,7 +97,7 @@ def test_search_retains_disambiguation_missing_identity_and_enrichment_failure()
     responses = [{"query": {"search": [
         {"title": title, "pageid": i, "ns": 0} for i, title in enumerate(["A", "B", "C"], 1)
     ]}}, page("A", pageprops={"wikibase_item": "Q123", "disambiguation": ""}),
-        page("B", qid=None), httpx.Response(503)]
+        page("B", qid=None), *[httpx.Response(503) for _ in range(3)]]
     with httpx.Client(transport=transport(responses, [])) as client:
         candidates = search_topic_candidates("ambiguous", "en", user_agent=UA, client=client)
     assert [c.status for c in candidates] == ["DISAMBIGUATION_PAGE", "WIKIDATA_ITEM_MISSING", "API_UNAVAILABLE"]
@@ -142,17 +149,60 @@ def test_section_redirect_is_not_a_whole_topic():
 
 
 def test_two_languages_map_same_identity():
-    result, calls = mapping([page(), entity(), page("Fasting pl", language="pl"), page("Fasting cs", language="cs")])
+    result, calls = mapping([page(), langlinks(), page("Fasting pl", language="pl"), page("Fasting cs", language="cs")])
     assert result.status == "resolved"
     assert [m.wikidata_id for m in result.language_mappings] == ["Q123", "Q123"]
     assert all(m.status == "valid" for m in result.language_mappings)
-    assert calls[1].url.host == "www.wikidata.org"
-    assert calls[1].url.params["props"] == "sitelinks/urls"
+    assert [m.language for m in result.language_mappings] == ["pl", "cs"]
+    assert calls[1].url.host == "en.wikipedia.org"
+    assert calls[1].url.params["prop"] == "langlinks"
+    assert calls[1].url.params["titles"] == "Fasting"
+    assert calls[1].url.params["llprop"] == "url"
+    assert calls[1].url.params["lllimit"] == "max"
+    assert all(call.url.host != "www.wikidata.org" for call in calls)
+
+
+def test_czech_and_ukrainian_langlinks_validate_localized_titles_in_requested_order():
+    payload = langlinks(("cs", "uk"))
+    cs, uk = payload["query"]["pages"][0]["langlinks"]
+    cs.update(title="Přerušovaný půst", url="https://cs.wikipedia.org/wiki/Přerušovaný_půst")
+    uk.update(title="Інтервальне голодування",
+              url="https://uk.wikipedia.org/wiki/Інтервальне_голодування")
+    result, calls = mapping([
+        page(), payload,
+        page("Інтервальне голодування", language="uk"),
+        page("Přerušovaný půst", language="cs"),
+    ], ("uk", "cs"))
+    assert result.status == "resolved"
+    assert [item.language for item in result.language_mappings] == ["uk", "cs"]
+    assert [item.article_title for item in result.language_mappings] == [
+        "Інтервальне голодування", "Přerušovaný půst",
+    ]
+    assert [call.url.params.get("titles") for call in calls[2:]] == [
+        "Інтервальне голодування", "Přerušovaný půst",
+    ]
+    assert all("srsearch" not in call.url.params for call in calls)
+    assert all(call.url.host != "www.wikidata.org" for call in calls)
+
+
+def test_langlinks_continuation_is_followed_before_requested_order_mapping():
+    first = langlinks(("cs",))
+    first.pop("batchcomplete")
+    first["continue"] = {"continue": "||", "llcontinue": "10|cs"}
+    second = langlinks(("uk",))
+    result, calls = mapping([
+        page(), first, second,
+        page("Fasting uk", language="uk"), page("Fasting cs", language="cs"),
+    ], ("uk", "cs"))
+    assert result.status == "resolved"
+    assert [item.language for item in result.language_mappings] == ["uk", "cs"]
+    assert calls[2].url.params["continue"] == "||"
+    assert calls[2].url.params["llcontinue"] == "10|cs"
 
 
 def test_intermittent_fasting_czech_present_polish_missing_no_replacement_search():
     # Synthetic regression scenario, not an assertion about current live sitelinks.
-    result, calls = mapping([page(), entity(("cs",)), page("Fasting cs", language="cs")])
+    result, calls = mapping([page(), langlinks(("cs",)), page("Fasting cs", language="cs")])
     assert result.original_query == "intermittent fasting"
     assert result.status == "partial"
     polish, czech = result.language_mappings
@@ -163,8 +213,72 @@ def test_intermittent_fasting_czech_present_polish_missing_no_replacement_search
     assert all("srsearch" not in call.url.params for call in calls)
 
 
+def test_langlinks_maxlag_then_success_retries_same_request():
+    maxlag = httpx.Response(
+        200, json={"error": {"code": "maxlag", "info": "Waiting for wdqs1016"}},
+        headers={"Retry-After": "0"},
+    )
+    result, calls = mapping([
+        page(), maxlag, langlinks(("cs",)), page("Fasting cs", language="cs"),
+    ], ("cs",))
+    assert result.status == "resolved"
+    first, second = calls[1:3]
+    assert first.url == second.url
+    assert first.url.host == "en.wikipedia.org"
+    assert first.url.params["action"] == "query"
+    assert first.url.params["titles"] == "Fasting"
+    assert first.url.params["prop"] == "langlinks"
+    assert first.url.params["maxlag"] == "5"
+    assert all("srsearch" not in call.url.params for call in calls)
+
+
+def test_langlinks_503_then_success():
+    result, calls = mapping([
+        page(), httpx.Response(503), langlinks(("cs",)), page("Fasting cs", language="cs"),
+    ], ("cs",))
+    assert result.status == "resolved"
+    assert calls[1].url == calls[2].url
+
+
+def test_langlinks_429_respects_retry_after(monkeypatch):
+    waits = []
+    monkeypatch.setattr(topic_resolver.time, "sleep", waits.append)
+    result, _ = mapping([
+        page(), httpx.Response(429, headers={"Retry-After": "2"}),
+        langlinks(("cs",)), page("Fasting cs", language="cs"),
+    ], ("cs",))
+    assert result.status == "resolved"
+    assert waits == [2.0]
+
+
+def test_langlinks_retry_budget_exhausted_preserves_error():
+    maxlag = lambda: httpx.Response(
+        200, json={"error": {"code": "maxlag", "info": "busy"}},
+        headers={"Retry-After": "0"},
+    )
+    calls = []
+    responses = [page(), maxlag(), maxlag(), maxlag()]
+    with httpx.Client(transport=transport(responses, calls)) as client:
+        with pytest.raises(WikipediaError) as error:
+            map_topic_languages("fasting", selected(), ["cs"], user_agent=UA, client=client)
+    assert error.value.code == "API_UNAVAILABLE"
+    assert error.value.retry_after == "0"
+    assert len(calls) == 4
+    assert calls[1].url == calls[2].url == calls[3].url
+
+
+def test_semantic_action_error_is_not_retried():
+    response = {"error": {"code": "badvalue", "info": "invalid parameter"}}
+    calls = []
+    with httpx.Client(transport=transport([response], calls)) as client:
+        with pytest.raises(WikipediaError) as error:
+            search_topic_candidates("fasting", "en", user_agent=UA, client=client)
+    assert error.value.code == "INVALID_REQUEST"
+    assert len(calls) == 1
+
+
 def test_all_languages_missing():
-    result, _ = mapping([page(), entity(())])
+    result, _ = mapping([page(), langlinks(())])
     assert result.status == "unresolved"
     assert len(result.language_mappings) == 2
 
@@ -175,11 +289,12 @@ def test_all_languages_missing():
     (page("Fasting pl", language="pl", pageprops={"disambiguation": "", "wikibase_item": "Q123"}), "DISAMBIGUATION_PAGE"),
     (page("Fasting pl", qid=None, language="pl"), "WIKIDATA_ITEM_MISSING"),
     (httpx.Response(429, headers={"Retry-After": "60"}), "RATE_LIMITED"),
-    (httpx.Response(503), "API_UNAVAILABLE"),
+    ([httpx.Response(503) for _ in range(3)], "API_UNAVAILABLE"),
     ({"query": {}}, "INVALID_API_RESPONSE"),
 ])
 def test_target_failure_does_not_discard_other_language(target, code):
-    result, _ = mapping([page(), entity(), target, page("Fasting cs", language="cs")])
+    targets = target if isinstance(target, list) else [target]
+    result, _ = mapping([page(), langlinks(), *targets, page("Fasting cs", language="cs")])
     assert result.status == "partial"
     assert result.language_mappings[0].status == code
     assert result.language_mappings[0].error.code == code
@@ -191,7 +306,7 @@ def test_target_failure_does_not_discard_other_language(target, code):
 def test_target_redirect_with_matching_qid():
     target = page("Canonical", language="cs")
     target["query"]["redirects"] = [{"from": "Fasting cs", "to": "Canonical"}]
-    result, _ = mapping([page(), entity(("cs",)), target], ("cs",))
+    result, _ = mapping([page(), langlinks(("cs",)), target], ("cs",))
     assert result.status == "resolved"
     mapped = result.language_mappings[0]
     assert mapped.sitelink_title == "Fasting cs"
@@ -199,19 +314,14 @@ def test_target_redirect_with_matching_qid():
     assert mapped.redirect_chain == ["Fasting cs", "Canonical"]
 
 
-def test_sitelink_uses_official_url_not_guessed_site_id():
-    payload = entity(("cs",))
-    link = payload["entities"]["Q123"]["sitelinks"].pop("cswiki")
-    payload["entities"]["Q123"]["sitelinks"]["exceptional_site_id"] = link
-    result, _ = mapping([page(), payload, page("Fasting cs", language="cs")], ("cs",))
+def test_langlink_uses_official_url_host():
+    result, _ = mapping([page(), langlinks(("cs",)), page("Fasting cs", language="cs")], ("cs",))
     assert result.status == "resolved"
 
 
 @pytest.mark.parametrize("response,code", [
     (httpx.Response(429, headers={"Retry-After": "120"}), "RATE_LIMITED"),
-    (httpx.Response(500), "API_UNAVAILABLE"), (httpx.Response(403), "ACCESS_BLOCKED"),
-    (httpx.ConnectError("offline"), "API_UNAVAILABLE"),
-    (httpx.ReadTimeout("timeout"), "API_UNAVAILABLE"),
+    (httpx.Response(403), "ACCESS_BLOCKED"),
     (httpx.Response(200, json={"error": {"code": "maxlag", "info": "busy"}}, headers={"Retry-After": "120"}), "API_UNAVAILABLE"),
     ({"error": {"code": "ratelimited"}}, "RATE_LIMITED"),
     ({"error": {"code": "readapidenied"}}, "ACCESS_BLOCKED"),
@@ -225,7 +335,7 @@ def test_http_and_api_errors(response, code):
         with pytest.raises(WikipediaError) as error:
             search_topic_candidates("fasting", "en", user_agent=UA, client=client)
     assert error.value.code == code
-    assert len(calls) == 1  # no retries
+    assert len(calls) == 1
     if isinstance(response, httpx.Response) and "Retry-After" in response.headers:
         assert error.value.retry_after == "120"
 
@@ -249,24 +359,22 @@ def test_source_identity_change_stops_mapping():
     assert error.value.code == "TOPIC_MAPPING_MISMATCH"
 
 
-def test_malformed_sitelink_url_is_a_domain_failure():
-    payload = entity(("cs",))
-    payload["entities"]["Q123"]["sitelinks"]["cswiki"]["url"] = "https://[broken"
+def test_malformed_langlink_url_is_a_domain_failure():
+    payload = langlinks(("cs",))
+    payload["query"]["pages"][0]["langlinks"][0]["url"] = "https://[broken"
     result, _ = mapping([page(), payload], ("cs",))
     assert result.status == "unresolved"
     assert result.language_mappings[0].status == "INVALID_API_RESPONSE"
 
 
-@pytest.mark.parametrize("payload,code", [
-    ({}, "INVALID_API_RESPONSE"),
-    ({"entities": {"Q123": {"id": "Q123", "missing": ""}}}, "WIKIDATA_ITEM_MISSING"),
-    ({"entities": {"Q123": {"id": "Q999"}}}, "TOPIC_MAPPING_MISMATCH"),
-    ({"entities": {"Q123": {"id": "Q123", "sitelinks": []}}}, "INVALID_API_RESPONSE"),
+@pytest.mark.parametrize("payload", [
+    {}, {"query": {"pages": []}}, langlinks((), pageid=11),
+    langlinks((), title="Other"), langlinks((), langlinks={}),
 ])
-def test_invalid_shared_entity(payload, code):
+def test_invalid_shared_langlinks_response(payload):
     with pytest.raises(WikipediaError) as error:
         mapping([page(), payload])
-    assert error.value.code == code
+    assert error.value.code == "INVALID_API_RESPONSE"
 
 
 @pytest.mark.parametrize("options", [

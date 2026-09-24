@@ -4,6 +4,7 @@ from contextlib import nullcontext
 from datetime import UTC, date, datetime, timedelta
 import math
 import re
+import time
 from urllib.parse import quote
 
 import httpx
@@ -13,6 +14,34 @@ from wikipedia_interest.models import (
 )
 
 _BASE_URL = "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article"
+_MAX_ATTEMPTS = 3
+_MAX_RETRY_DELAY = 5.0
+
+
+def _retry_delay(retry_after: str | None, attempt: int) -> float | None:
+    """Return a bounded delay, or None when a server delay is too long."""
+    if retry_after is not None:
+        try:
+            delay = float(retry_after)
+        except ValueError:
+            delay = 2 ** (attempt - 1)
+        else:
+            if not math.isfinite(delay) or delay < 0:
+                delay = 2 ** (attempt - 1)
+            elif delay > _MAX_RETRY_DELAY:
+                return None
+        return min(delay, _MAX_RETRY_DELAY)
+    return min(2 ** (attempt - 1), _MAX_RETRY_DELAY)
+
+
+def _wait_to_retry(retry_after: str | None, attempt: int) -> bool:
+    if attempt >= _MAX_ATTEMPTS:
+        return False
+    delay = _retry_delay(retry_after, attempt)
+    if delay is None:
+        return False
+    time.sleep(delay)
+    return True
 
 
 def fetch_pageviews(
@@ -23,10 +52,9 @@ def fetch_pageviews(
 
     Supply an identifying User-Agent with your application/version and contact.
     A supplied HTTPX client remains owned by the caller; otherwise this function
-    opens and closes a client. Timeout applies to HTTPX network operations, not
-    total elapsed time. No automatic retries: callers can inspect RATE_LIMITED,
-    API_UNAVAILABLE and the raw Retry-After header before deciding to retry.
-    TODO: add bounded retries once the operational policy is agreed.
+    opens and closes a client. Timeout applies to each HTTPX network attempt, not
+    total elapsed time. Transient failures use at most three attempts and bounded
+    waits; final errors preserve RATE_LIMITED/API_UNAVAILABLE and Retry-After.
 
     HTTP 404 and empty items return no_data, never ARTICLE_NOT_FOUND. This
     function measures only the supplied title, without resolving or merging aliases.
@@ -47,14 +75,26 @@ def fetch_pageviews(
         f"{_BASE_URL}/{request.project}/{request.access}/{request.agent}/{article}"
         f"/daily/{request.start_date:%Y%m%d}00/{request.end_date:%Y%m%d}00"
     )
-    try:
-        with nullcontext(client) if client is not None else httpx.Client() as http:
-            response = http.get(
-                url, headers={"User-Agent": user_agent, "Accept": "application/json"},
-                timeout=timeout, follow_redirects=False,
-            )
-    except httpx.RequestError as exc:
-        raise PageviewError("API_UNAVAILABLE", "Pageview request failed or timed out.") from exc
+    with nullcontext(client) if client is not None else httpx.Client() as http:
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                response = http.get(
+                    url, headers={"User-Agent": user_agent, "Accept": "application/json"},
+                    timeout=timeout, follow_redirects=False,
+                )
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                if _wait_to_retry(None, attempt):
+                    continue
+                raise PageviewError("API_UNAVAILABLE", "Pageview request failed or timed out.") from exc
+            except httpx.RequestError as exc:
+                raise PageviewError("API_UNAVAILABLE", "Pageview request failed or timed out.") from exc
+            if response.status_code == 429 or 500 <= response.status_code < 600:
+                retry_after = response.headers.get("Retry-After")
+                if _wait_to_retry(retry_after, attempt):
+                    continue
+            break
+        else:
+            raise AssertionError("Retry loop exhausted without returning or raising.")
 
     if response.status_code == 404:
         points = []

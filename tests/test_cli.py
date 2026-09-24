@@ -4,6 +4,7 @@ from datetime import date
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from tests.test_presentation import example
@@ -89,6 +90,34 @@ def test_research_selection_identity_order_defaults_and_no_raw_arrays(workflow, 
     assert calls[0][-1]['client'] is calls[1][-1]['client']
     assert calls[0][-1]['client'].is_closed
     assert '"points"' not in json.dumps(payload, allow_nan=False)
+
+
+def test_debug_request_trace_is_sanitized_and_uses_stderr(capsys):
+    request = httpx.Request(
+        'GET', 'https://en.wikipedia.org/w/api.php',
+        params={'action': 'query', 'titles': 'Intermittent fasting',
+                'prop': 'langlinks', 'llprop': 'url', 'lllimit': 'max',
+                'maxlag': '5', 'format': 'json'},
+        headers={'User-Agent': 'Secret contact', 'Authorization': 'Bearer secret'},
+    )
+    cli._debug_request(request)
+    output = capsys.readouterr()
+    assert output.out == ''
+    record = json.loads(output.err)
+    assert record == {
+        'debug': 'outbound_request', 'stage': 'resolve_langlinks', 'method': 'GET',
+        'host': 'en.wikipedia.org', 'path': '/w/api.php',
+        'params': {'action': 'query', 'titles': 'Intermittent fasting',
+                   'prop': 'langlinks', 'llprop': 'url', 'lllimit': 'max',
+                   'maxlag': '5'},
+    }
+    assert 'Secret contact' not in output.err
+    assert 'Bearer secret' not in output.err
+
+
+def test_debug_flag_is_explicit_and_disabled_by_default():
+    assert not cli._parser().parse_args(BASE).debug
+    assert cli._parser().parse_args(BASE + ['--debug']).debug
 
 
 @pytest.mark.parametrize('today,start,end', [

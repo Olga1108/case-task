@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 
 import httpx
 
@@ -59,6 +60,33 @@ def _error(error: WikipediaError) -> dict:
     return record
 
 
+def _debug_request(request: httpx.Request) -> None:
+    """Write one sanitized outbound-request record without headers or secrets."""
+    params = dict(request.url.params.multi_items())
+    action = params.get('action')
+    if action == 'query' and params.get('prop') == 'langlinks':
+        stage = 'resolve_langlinks'
+    elif action == 'query' and 'titles' in params:
+        stage = 'validate_page'
+    elif request.url.path.startswith('/api/rest_v1/metrics/pageviews/per-article/'):
+        stage = 'fetch_pageviews'
+    else:
+        stage = 'other_wikimedia_request'
+    safe_names = (
+        'action', 'titles', 'ids', 'prop', 'props', 'redirects', 'llprop', 'lllimit',
+        'continue', 'llcontinue', 'maxlag',
+    )
+    record = {
+        'debug': 'outbound_request',
+        'stage': stage,
+        'method': request.method,
+        'host': request.url.host,
+        'path': request.url.path,
+        'params': {name: params[name] for name in safe_names if name in params},
+    }
+    print(json.dumps(record, ensure_ascii=False, allow_nan=False), file=sys.stderr, flush=True)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(description='Wikipedia attention evidence as JSON; no automatic topic selection.')
     commands = parser.add_subparsers(dest='command', required=True)
@@ -75,6 +103,7 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument('--end')
             command.add_argument('--months', type=int, help='Last N complete calendar months; default 24.')
             command.add_argument('--chart', type=Path, help='PNG output path; parent directory must exist.')
+            command.add_argument('--debug', action='store_true', help='Trace sanitized outbound requests to stderr.')
     return parser
 
 
@@ -108,7 +137,8 @@ def _execute(args) -> dict:
     # Reuse the domain request validator before making resolution HTTP calls.
     PageviewRequest(f'{args.query_language}.wikipedia.org', args.selected_title, start, end)
     selected = TopicCandidate(args.query_language, args.selected_title, wikidata_id=args.expected_qid)
-    with httpx.Client() as client:
+    event_hooks = {'request': [_debug_request]} if args.debug else None
+    with httpx.Client(event_hooks=event_hooks) as client:
         # map_topic_languages validates the source candidate and its pinned identity.
         resolved = map_topic_languages(args.query, selected, languages, user_agent=args.user_agent, client=client)
         result = research_topic(resolved, start, end, user_agent=args.user_agent, client=client)

@@ -7,10 +7,16 @@ import httpx
 import pytest
 
 from wikipedia_interest import research
+from wikipedia_interest import wikipedia_client
 from wikipedia_interest.models import LanguageMapping, ResolvedTopic, TopicCandidate, WikipediaError
 
 START, END = date(2026, 1, 1), date(2026, 1, 31)
 UA = 'ResearchTests/0.1 (https://example.org/contact)'
+
+
+@pytest.fixture(autouse=True)
+def no_retry_wait(monkeypatch):
+    monkeypatch.setattr(wikipedia_client.time, 'sleep', lambda _: None)
 
 
 def mapping(language, valid=True):
@@ -68,6 +74,7 @@ def test_one_language_full_workflow_defaults_and_warnings():
     assert (request.granularity, request.access, request.agent) == ('daily', 'all-access', 'user')
     assert (request.start_date, request.end_date) == (START, END)
     assert calls[0].url.path.endswith('/cs.wikipedia.org/all-access/user/Canonical_cs/daily/2026010100/2026013100')
+    assert 'Intermittent_fasting' not in calls[0].url.path
     assert 'Mapping warning cs' in language.warnings
     assert set(language.pageviews.warnings) <= set(language.warnings)
     assert set(language.analysis.warnings) <= set(language.warnings)
@@ -106,12 +113,13 @@ def test_intermittent_fasting_czech_valid_polish_missing():
 
 @pytest.mark.parametrize('response', [httpx.Response(503), httpx.ConnectError('offline')])
 def test_individual_failure_does_not_abort_later_languages(response):
-    result, calls = run(topic(mapping('uk'), mapping('cs'), mapping('pl', False)), [response, payload('cs')])
+    result, calls = run(topic(mapping('uk'), mapping('cs'), mapping('pl', False)),
+                        [response, response, response, payload('cs')])
     assert result.status == 'partial'
     assert [r.status for r in result.languages] == ['retrieval_failed', 'completed', 'mapping_unavailable']
     assert result.languages[0].error.code == 'API_UNAVAILABLE'
     assert result.languages[1].analysis is not None
-    assert len(calls) == 2
+    assert len(calls) == 4
 
 
 def test_all_mappings_unavailable():
@@ -125,9 +133,10 @@ def test_all_mappings_unavailable():
 
 def test_all_retrievals_fail_preserves_retry_details():
     result, calls = run(topic(mapping('cs'), mapping('uk')),
-                        [httpx.Response(503), httpx.Response(429, headers={'Retry-After': '60'})])
+                        [*[httpx.Response(503) for _ in range(3)],
+                         httpx.Response(429, headers={'Retry-After': '60'})])
     assert result.status == 'failed'
-    assert len(calls) == 2
+    assert len(calls) == 4
     assert result.languages[1].error.code == 'RATE_LIMITED'
     assert result.languages[1].error.retry_after == '60'
     assert all(r.status == 'retrieval_failed' for r in result.languages)
@@ -189,7 +198,7 @@ def test_internal_client_is_created_once_and_closed(monkeypatch, failure):
     assert result.status == ('failed' if failure else 'completed')
     assert created == [owned]
     assert owned.is_closed
-    assert len(calls) == 2
+    assert len(calls) == (6 if failure else 2)
 
 
 @pytest.mark.parametrize('changes', [

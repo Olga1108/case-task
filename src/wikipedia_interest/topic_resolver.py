@@ -1,15 +1,17 @@
 """Explicit candidate discovery and structural cross-language mapping.
 
-No candidate selection, translation, caching, or retries. Public functions accept
-an optional caller-owned HTTPX client; otherwise each operation closes its client.
+No candidate selection, translation, or caching. Transient HTTP failures use a
+small retry budget. Public functions accept an optional caller-owned HTTPX client;
+otherwise each operation closes its client.
 Language arguments are Wikipedia edition subdomains (e.g. en, pl, cs, uk).
-Sitelinks are matched by their official URL host, not guessed from language codes.
+Langlinks are matched by their official URL host, not guessed from language codes.
 """
 
 from contextlib import nullcontext
 from html.parser import HTMLParser
 import math
 import re
+import time
 from urllib.parse import urlsplit
 
 import httpx
@@ -17,6 +19,9 @@ import httpx
 from wikipedia_interest.models import (
     LanguageMapping, ResolvedTopic, TopicCandidate, WikipediaError,
 )
+
+_MAX_ATTEMPTS = 3
+_MAX_RETRY_DELAY = 5.0
 
 
 def _text(value: object, label: str) -> str:
@@ -55,53 +60,93 @@ def _url_host(value: object) -> str:
     return parsed.netloc
 
 
+def _retry_delay(retry_after: str | None, attempt: int) -> float | None:
+    """Return a bounded delay, or None when a server delay is too long."""
+    if retry_after is not None:
+        try:
+            delay = float(retry_after)
+        except ValueError:
+            delay = 2 ** (attempt - 1)
+        else:
+            if not math.isfinite(delay) or delay < 0:
+                delay = 2 ** (attempt - 1)
+            elif delay > _MAX_RETRY_DELAY:
+                return None
+        return min(delay, _MAX_RETRY_DELAY)
+    return min(2 ** (attempt - 1), _MAX_RETRY_DELAY)
+
+
+def _wait_to_retry(retry_after: str | None, attempt: int) -> bool:
+    if attempt >= _MAX_ATTEMPTS:
+        return False
+    delay = _retry_delay(retry_after, attempt)
+    if delay is None:
+        return False
+    time.sleep(delay)
+    return True
+
+
 def _get(http: httpx.Client, host: str, params: dict, user_agent: str, timeout: float) -> dict:
-    """Action API GET; maxlag is appropriate for these serial background lookups."""
-    try:
-        response = http.get(
-            f"https://{host}/w/api.php",
-            params={**params, "format": "json", "formatversion": 2, "maxlag": 5},
-            headers={"User-Agent": user_agent, "Accept": "application/json"},
-            timeout=timeout, follow_redirects=False,
-        )
-    except httpx.RequestError as exc:
-        raise WikipediaError("API_UNAVAILABLE", "Wikipedia request failed or timed out.") from exc
-    status = response.status_code
-    retry_after = response.headers.get("Retry-After")
-    if status != 200:
-        code = "UNEXPECTED_HTTP_STATUS"
-        if status == 429:
-            code = "RATE_LIMITED"
-        elif status >= 500:
-            code = "API_UNAVAILABLE"
-        elif status in (401, 403):
-            code = "ACCESS_BLOCKED"
-        elif status == 400:
-            code = "INVALID_REQUEST"
-        raise WikipediaError(code, f"Action API returned HTTP {status}.",
-                             http_status=status, retry_after=retry_after)
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise _invalid("Action API returned invalid JSON.") from exc
-    if not isinstance(payload, dict):
-        raise _invalid("Expected an Action API object.")
-    if "error" in payload:
-        error = payload["error"]
-        if not isinstance(error, dict) or not isinstance(error.get("code"), str):
-            raise _invalid("Malformed Action API error.")
-        upstream = error["code"]
-        code = {
-            "ratelimited": "RATE_LIMITED", "maxlag": "API_UNAVAILABLE",
-            "readonly": "API_UNAVAILABLE", "permissiondenied": "ACCESS_BLOCKED",
-            "readapidenied": "ACCESS_BLOCKED", "badvalue": "INVALID_REQUEST",
-        }.get(upstream, "API_UNAVAILABLE")
-        raise WikipediaError(code, f"Action API error {upstream}: {error.get('info', '')}",
-                             http_status=status, retry_after=retry_after)
-    # An ignored parameter could undermine validation; do not silently accept it.
-    if payload.get("warnings"):
-        raise _invalid(f"Action API reported warnings: {payload['warnings']}")
-    return payload
+    """Action API GET with bounded retries for transient upstream failures."""
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            response = http.get(
+                f"https://{host}/w/api.php",
+                params={**params, "format": "json", "formatversion": 2, "maxlag": 5},
+                headers={"User-Agent": user_agent, "Accept": "application/json"},
+                timeout=timeout, follow_redirects=False,
+            )
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            if _wait_to_retry(None, attempt):
+                continue
+            raise WikipediaError("API_UNAVAILABLE", "Wikipedia request failed or timed out.") from exc
+        except httpx.RequestError as exc:
+            raise WikipediaError("API_UNAVAILABLE", "Wikipedia request failed or timed out.") from exc
+        status = response.status_code
+        retry_after = response.headers.get("Retry-After")
+        if status != 200:
+            code = "UNEXPECTED_HTTP_STATUS"
+            if status == 429:
+                code = "RATE_LIMITED"
+            elif status >= 500:
+                code = "API_UNAVAILABLE"
+            elif status in (401, 403):
+                code = "ACCESS_BLOCKED"
+            elif status == 400:
+                code = "INVALID_REQUEST"
+            failure = WikipediaError(code, f"Action API returned HTTP {status}.",
+                                     http_status=status, retry_after=retry_after)
+            if (status == 429 or 500 <= status < 600) and _wait_to_retry(retry_after, attempt):
+                continue
+            raise failure
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise _invalid("Action API returned invalid JSON.") from exc
+        if not isinstance(payload, dict):
+            raise _invalid("Expected an Action API object.")
+        if "error" in payload:
+            error = payload["error"]
+            if not isinstance(error, dict) or not isinstance(error.get("code"), str):
+                raise _invalid("Malformed Action API error.")
+            upstream = error["code"]
+            code = {
+                "ratelimited": "RATE_LIMITED", "maxlag": "API_UNAVAILABLE",
+                "readonly": "API_UNAVAILABLE", "permissiondenied": "ACCESS_BLOCKED",
+                "readapidenied": "ACCESS_BLOCKED", "badvalue": "INVALID_REQUEST",
+            }.get(upstream, "API_UNAVAILABLE")
+            failure = WikipediaError(
+                code, f"Action API error {upstream}: {error.get('info', '')}",
+                http_status=status, retry_after=retry_after,
+            )
+            if upstream == "maxlag" and _wait_to_retry(retry_after, attempt):
+                continue
+            raise failure
+        # An ignored parameter could undermine validation; do not silently accept it.
+        if payload.get("warnings"):
+            raise _invalid(f"Action API reported warnings: {payload['warnings']}")
+        return payload
+    raise AssertionError("Retry loop exhausted without returning or raising.")
 
 
 class _PlainText(HTMLParser):
@@ -278,14 +323,59 @@ def search_topic_candidates(
         return candidates
 
 
+def _langlinks(
+    http: httpx.Client, source: TopicCandidate, user_agent: str, timeout: float,
+) -> dict[str, dict]:
+    """Retrieve all interlanguage links for one already validated source page."""
+    params = {
+        "action": "query", "titles": source.article_title, "prop": "langlinks",
+        "llprop": "url", "lllimit": "max",
+    }
+    links: dict[str, dict] = {}
+    seen_continuations = set()
+    while True:
+        payload = _get(http, _project(source.source_language), params, user_agent, timeout)
+        query = payload.get("query")
+        pages = query.get("pages") if isinstance(query, dict) else None
+        if not isinstance(pages, list) or len(pages) != 1 or not isinstance(pages[0], dict):
+            raise _invalid("Expected exactly one source page with language links.")
+        page = pages[0]
+        if page.get("pageid") != source.page_id or page.get("title") != source.article_title:
+            raise _invalid("Language links response does not match the validated source page.")
+        page_links = page.get("langlinks", [])
+        if not isinstance(page_links, list):
+            raise _invalid("Malformed language links list.")
+        for link in page_links:
+            if (not isinstance(link, dict) or not isinstance(link.get("lang"), str)
+                    or not isinstance(link.get("title"), str) or not link["title"]
+                    or not isinstance(link.get("url"), str)):
+                raise _invalid("Malformed language link.")
+            language = link["lang"]
+            if language in links:
+                raise _invalid("Duplicate language link.")
+            links[language] = link
+        continuation = payload.get("continue")
+        if continuation is None:
+            return links
+        if (not isinstance(continuation, dict)
+                or set(continuation) != {"continue", "llcontinue"}
+                or not all(isinstance(value, str) for value in continuation.values())):
+            raise _invalid("Malformed language links continuation.")
+        marker = (continuation["continue"], continuation["llcontinue"])
+        if marker in seen_continuations:
+            raise _invalid("Repeated language links continuation.")
+        seen_continuations.add(marker)
+        params = params | continuation
+
+
 def map_topic_languages(
     original_query: str, selected: TopicCandidate, languages: list[str], *,
     user_agent: str, timeout: float = 10.0, client: httpx.Client | None = None,
 ) -> ResolvedTopic:
     """Map an explicit selection; never search for replacement pages.
 
-    Selection is revalidated. Shared source/entity failures raise WikipediaError;
-    individual target failures remain in language_mappings. Official sitelink URLs
+    Selection is revalidated. Shared source/langlinks failures raise WikipediaError;
+    individual target failures remain in language_mappings. Official langlink URLs
     identify editions, avoiding assumptions about exceptional Wikidata site IDs.
     """
     _configuration(user_agent, timeout)
@@ -303,38 +393,16 @@ def map_topic_languages(
         if selected.status != "valid":
             raise selected.error
         qid = selected.wikidata_id
-        payload = _get(http, "www.wikidata.org", {
-            "action": "wbgetentities", "ids": qid, "props": "sitelinks/urls",
-            "redirects": "no",
-        }, user_agent, timeout)
-        entities = payload.get("entities")
-        if not isinstance(entities, dict) or not isinstance(entities.get(qid), dict):
-            raise _invalid("Missing requested Wikidata entity.")
-        entity = entities[qid]
-        if "missing" in entity:
-            raise WikipediaError("WIKIDATA_ITEM_MISSING", "Selected Wikidata item is missing or redirected.")
-        if entity.get("id") != qid:
-            raise WikipediaError("TOPIC_MAPPING_MISMATCH", "Wikidata returned a different entity.")
-        sitelinks = entity.get("sitelinks")
-        if not isinstance(sitelinks, dict):
-            raise _invalid("Missing entity sitelinks object.")
+        langlinks = _langlinks(http, selected, user_agent, timeout)
         mappings = []
         for language, project in zip(languages, projects):
             mapping = LanguageMapping(language, project, "LANGUAGE_SITELINK_MISSING")
             try:
-                matches = []
-                for link in sitelinks.values():
-                    if not isinstance(link, dict) or not isinstance(link.get("url"), str):
-                        raise _invalid("Malformed sitelink URL.")
-                    if _url_host(link["url"]) == project:
-                        matches.append(link)
-                if len(matches) > 1:
-                    raise _invalid("Multiple sitelinks for one Wikipedia edition.")
-                if not matches:
-                    raise WikipediaError("LANGUAGE_SITELINK_MISSING", f"No {language} sitelink for {qid}.")
-                link = matches[0]
-                if not isinstance(link.get("title"), str) or not link["title"]:
-                    raise _invalid("Missing sitelink title.")
+                link = langlinks.get(language)
+                if link is None:
+                    raise WikipediaError("LANGUAGE_SITELINK_MISSING", f"No {language} langlink for {qid}.")
+                if _url_host(link["url"]) != project:
+                    raise _invalid("Language link URL does not match the requested Wikipedia edition.")
                 mapping.sitelink_title = link["title"]
                 target = _page(http, link["title"], language, user_agent, timeout)
                 for name in ("article_title", "page_id", "canonical_url", "wikidata_id",

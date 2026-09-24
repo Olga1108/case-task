@@ -12,9 +12,10 @@ fixtures. No analytics formulas or implementation are specified here.
 
 **Recommendation:** retrieve daily observations for each selected article, retain
 them for follow-up questions, and present complete calendar months. Start topic
-discovery with Wikipedia search in the query's language, then use a selected
-Wikidata entity to map the requested editions. Keep selection evidence and
-per-language failures visible.
+discovery with Wikipedia search in the query's language, retain the selected
+page's Wikidata Q-ID as the identity boundary, and use its source-page langlinks
+to propose requested-edition targets for Q-ID validation. Keep selection evidence
+and per-language failures visible.
 
 The most consequential documented limitations are title-based traffic attribution
 and ambiguous missing data: resolving a redirect does not merge its views into the
@@ -233,13 +234,16 @@ Illustrative request parameters on `https://www.wikidata.org/w/api.php`:
 `action=wbsearchentities&search=intermittent%20fasting&language=en&type=item&limit=5&format=json`.
 Entity search is a candidate source, not a guarantee of conceptual equivalence.
 
-**Fact — entity to editions:** `action=wbgetentities&ids=Q_ID` can request
-`props=labels|descriptions|aliases|sitelinks/urls`, `languages=en|pl|cs`,
-`sitefilter=plwiki|cswiki`, `format=json`. `languages` filters language-bearing
-metadata; `sitefilter` selects sitelinks. Alternatively, `sites=enwiki&titles=...`
-looks up the entity associated with a page. Entity redirects default to being
-resolved; this is distinct from Wikipedia article redirects.
-[Official wbgetentities help](https://www.wikidata.org/w/api.php?action=help&modules=wbgetentities).
+**Fact — source page to editions:** on the validated source Wikipedia edition,
+`action=query&titles=CANONICAL_TITLE&prop=langlinks&llprop=url&lllimit=max`
+returns interlanguage-link language codes, titles, and URLs. `lllang` filters one
+language only; `llcontinue` is returned when another response is needed.
+[Official langlinks help](https://www.mediawiki.org/wiki/API:Langlinks).
+
+**Recommendation:** retrieve source-page langlinks once, filter the explicitly
+requested languages, and validate every returned target article independently.
+The target's `pageprops.wikibase_item` must equal the already validated source
+Q-ID; langlinks supplies a candidate target title, not the identity decision.
 
 ### Recommended MVP resolution strategy
 
@@ -255,10 +259,11 @@ The following is a **proposed technical strategy**, not final Agent Skill instru
 3. Select a supported concept using the user's meaning, candidate descriptions
    and snippets. Record the selected identifier and reason. Do not equate first
    search rank, exact text match, or greatest traffic with semantic certainty.
-4. Retrieve that entity's target sitelinks. Resolve and validate each target
-   locally before requesting traffic. Return every requested language's status.
+4. Retrieve the validated source page's language links. Resolve and validate each
+   requested target locally against the source Q-ID before requesting traffic.
+   Return every requested language's status.
 5. If Wikipedia discovery is inadequate, offer Wikidata search candidates as a
-   fallback. Do not silently replace missing sitelinks with independently searched
+   fallback. Do not silently replace missing langlinks with independently searched
    near-matches or translated titles.
 
 **Why Wikipedia first:** page context helps interpret everyday phrases and ensures
@@ -268,7 +273,7 @@ surface many items without relevant articles. Neither route removes ambiguity.
 No embeddings, SPARQL dependency, or semantic-search infrastructure is needed.
 
 **Responsibility boundary:** code retrieves, normalizes, validates identifiers,
-checks namespaces/properties, maps sitelinks, and returns evidence. The agent may
+checks namespaces/properties, maps langlinks, and returns evidence. The agent may
 judge semantic relevance among supplied candidates and explain its choice. It must
 not invent titles/Q-IDs or override a mapping mismatch. If multiple candidates
 remain plausible, return `TOPIC_AMBIGUOUS` for a focused user clarification.
@@ -307,7 +312,7 @@ Flag differing coverage described in candidate context. Reject section redirects
 or broader-page substitutions for automatic article-level comparison: the target's
 whole-page traffic would not measure that narrower concept.
 
-**Recommendation:** if `plwiki` or `cswiki` is absent, return
+**Recommendation:** if a requested language code is absent from the source langlinks, return
 `LANGUAGE_SITELINK_MISSING`, not zero interest. Existing mapped languages may remain
 usable, but the requested comparison is incomplete. If the source page lacks a
 Q-ID, return a candidate-level issue instead of fabricating a cross-language match.
@@ -435,15 +440,16 @@ The no-data ambiguity is documented in
 
 ### 4. Topic resolution
 
-**Decision:** Wikipedia Action API discovery, then one selected Wikidata entity and
-validated language sitelinks; allow Wikidata discovery fallback.
+**Decision:** Wikipedia Action API discovery, then source-page langlinks followed
+by target-page validation against the selected Wikidata Q-ID; allow Wikidata
+discovery fallback.
 **Reason:** combines article context with explicit cross-language identity.
 **Alternative considered:** Wikidata-first for every phrase or independent translated searches.
 **Why not now:** the former may lack article context; the latter can silently mix concepts.
 
 ### 5. Redirect handling
 
-**Decision:** resolve inputs and sitelinks; initially measure only the canonical
+**Decision:** resolve inputs and langlinks; initially measure only the canonical
 title and show the coverage limitation. Stop unqualified interpretation of known moves.
 **Reason:** transparent, bounded first implementation.
 **Alternative considered:** aggregate every alias and reconstruct title histories.
@@ -493,7 +499,7 @@ and warnings; let the agent select with a reason or ask the user when uncertain.
    refresh/retention periods and when resolution metadata must be revalidated.
 8. **Example verification:** the actual current entity and Polish/Czech articles
    for “intermittent fasting” still need a live resolution fixture, including a
-   mismatch/absent-sitelink case. This document does not claim tested mappings.
+   mismatch/absent-langlink case. This document does not claim tested mappings.
 
 No production integration, API fixture tests, analytics formulas, or final skill
 workflow were implemented during this research. The official reference and its
@@ -521,5 +527,5 @@ Reviewed on 2026-09-23. Links also appear beside the claims they support.
 16. [Page information](https://www.mediawiki.org/wiki/API:Info)
 17. [Incoming redirects](https://www.mediawiki.org/wiki/API:Redirects)
 18. [Wikidata data access](https://www.wikidata.org/wiki/Wikidata:Data_access)
-19. [Wikidata wbgetentities help](https://www.wikidata.org/w/api.php?action=help&modules=wbgetentities)
+19. [Action API language links](https://www.mediawiki.org/wiki/API:Langlinks)
 20. [Wikidata sitelinks](https://www.wikidata.org/wiki/Help:Sitelinks)

@@ -5,10 +5,16 @@ from datetime import UTC, date, datetime
 import httpx
 import pytest
 
+from wikipedia_interest import wikipedia_client
 from wikipedia_interest.models import PageviewError, PageviewRequest
 from wikipedia_interest.wikipedia_client import fetch_pageviews
 
 UA = "WikipediaInterestTests/0.1 (https://example.org/contact)"
+
+
+@pytest.fixture(autouse=True)
+def no_retry_wait(monkeypatch):
+    monkeypatch.setattr(wikipedia_client.time, "sleep", lambda _: None)
 
 
 @pytest.fixture
@@ -24,6 +30,22 @@ def item(timestamp="2026010100", views=10, **changes):
 def fetch(sample_request, response):
     with httpx.Client(transport=httpx.MockTransport(lambda _: response)) as client:
         return fetch_pageviews(sample_request, user_agent=UA, client=client)
+
+
+def fetch_responses(sample_request, responses):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        value = responses.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = fetch_pageviews(sample_request, user_agent=UA, client=client)
+    assert not responses
+    return result, calls
 
 
 def test_success_sorts_points_preserves_zero_and_sends_defaults(sample_request):
@@ -110,7 +132,7 @@ def test_http_failures(sample_request, status, code):
 
 
 @pytest.mark.parametrize("exception", [httpx.ConnectError, httpx.ReadTimeout])
-def test_network_failure_is_wrapped_without_retry(sample_request, exception):
+def test_network_failure_exhausts_retry_budget(sample_request, exception):
     calls = []
 
     def handler(outgoing):
@@ -122,6 +144,41 @@ def test_network_failure_is_wrapped_without_retry(sample_request, exception):
             fetch_pageviews(sample_request, user_agent=UA, client=client)
     assert error.value.code == "API_UNAVAILABLE"
     assert isinstance(error.value.__cause__, exception)
+    assert len(calls) == 3
+
+
+def test_503_then_success(sample_request):
+    series, calls = fetch_responses(sample_request, [
+        httpx.Response(503),
+        httpx.Response(200, json={"items": [item(), item("2026010200"), item("2026010300")]}),
+    ])
+    assert series.status == "complete"
+    assert len(calls) == 2
+
+
+def test_429_respects_retry_after(sample_request, monkeypatch):
+    waits = []
+    monkeypatch.setattr(wikipedia_client.time, "sleep", waits.append)
+    series, calls = fetch_responses(sample_request, [
+        httpx.Response(429, headers={"Retry-After": "2"}),
+        httpx.Response(200, json={"items": [item(), item("2026010200"), item("2026010300")]}),
+    ])
+    assert series.status == "complete"
+    assert len(calls) == 2
+    assert waits == [2.0]
+
+
+def test_semantic_http_failure_is_not_retried(sample_request):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(400)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(PageviewError) as error:
+            fetch_pageviews(sample_request, user_agent=UA, client=client)
+    assert error.value.code == "INVALID_REQUEST"
     assert len(calls) == 1
 
 
