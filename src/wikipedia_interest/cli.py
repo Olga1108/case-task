@@ -103,6 +103,7 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument('--end')
             command.add_argument('--months', type=int, help='Last N complete calendar months; default 24.')
             command.add_argument('--chart', type=Path, help='PNG output path; parent directory must exist.')
+            command.add_argument('--report', type=Path, help='One-page PDF output path; parent directory must exist.')
             command.add_argument('--debug', action='store_true', help='Trace sanitized outbound requests to stderr.')
     return parser
 
@@ -143,7 +144,11 @@ def _execute(args) -> dict:
         resolved = map_topic_languages(args.query, selected, languages, user_agent=args.user_agent, client=client)
         result = research_topic(resolved, start, end, user_agent=args.user_agent, client=client)
     summary = build_agent_summary(result)
-    summary['execution'] = {'period_mode': period_mode, 'chart_path': None, 'chart_error': None}
+    summary['execution'] = {
+        'period_mode': period_mode,
+        'chart_path': None, 'chart_error': None,
+        'report_path': None, 'report_error': None,
+    }
     if args.chart is not None:
         try:
             from wikipedia_interest.charts import render_monthly_chart
@@ -151,6 +156,13 @@ def _execute(args) -> dict:
             summary['execution']['chart_path'] = str(path)
         except (ValueError, OSError) as error:
             summary['execution']['chart_error'] = {'code': 'CHART_UNAVAILABLE', 'message': str(error)}
+    if args.report is not None:
+        try:
+            from wikipedia_interest.report import render_pdf_report
+            path = render_pdf_report(result, args.report)
+            summary['execution']['report_path'] = str(path)
+        except Exception as error:
+            summary['execution']['report_error'] = {'code': 'REPORT_UNAVAILABLE', 'message': str(error)}
     return summary
 
 

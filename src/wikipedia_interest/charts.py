@@ -10,13 +10,10 @@ from matplotlib.figure import Figure
 from wikipedia_interest.models import ResearchResult
 
 
-def render_monthly_chart(result: ResearchResult, output_path: Path) -> Path:
-    """Save a headless PNG at exactly output_path; its parent must already exist.
-
-    Plot only complete, unadjusted monthly totals. Incomplete months break lines;
-    absent observations never become zero. Raise ValueError before writing when
-    no language has a complete source month. Input records remain unchanged.
-    """
+def build_monthly_figure(
+    result: ResearchResult, *, figsize: tuple[float, float] = (10, 5.5), dpi: int = 120,
+) -> Figure:
+    """Build the source-data figure without writing it or mutating result."""
     plotted = []
     for language in result.languages:
         if language.analysis is None:
@@ -28,7 +25,7 @@ def render_monthly_chart(result: ResearchResult, output_path: Path) -> Path:
     if not plotted:
         raise ValueError("No complete source monthly data is available to chart.")
 
-    figure = Figure(figsize=(10, 5.5), dpi=120)
+    figure = Figure(figsize=figsize, dpi=dpi)
     FigureCanvasAgg(figure)
     axes = figure.subplots()
     for language, months, values in plotted:
@@ -49,6 +46,17 @@ def render_monthly_chart(result: ResearchResult, output_path: Path) -> Path:
                 "Absolute traffic across language editions is not normalized market size.",
                 ha="center", fontsize=9)
     figure.tight_layout(rect=(0, 0.09, 1, 1))
+    return figure
+
+
+def render_monthly_chart(result: ResearchResult, output_path: Path) -> Path:
+    """Save a headless PNG at exactly output_path; its parent must already exist.
+
+    Plot only complete, unadjusted monthly totals. Incomplete months break lines;
+    absent observations never become zero. Raise ValueError before writing when
+    no language has a complete source month. Input records remain unchanged.
+    """
+    figure = build_monthly_figure(result)
     output_path = Path(output_path)
     figure.savefig(output_path, format="png")
     return output_path

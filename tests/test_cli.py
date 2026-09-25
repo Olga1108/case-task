@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from tests.test_presentation import example
-from wikipedia_interest import cli, charts
+from wikipedia_interest import cli, charts, report
 from wikipedia_interest.models import LanguageResearchResult, TopicCandidate, WikipediaError
 
 UA = 'Tests/1 (https://example.org/contact)'
@@ -185,6 +185,44 @@ def test_chart_failure_preserves_research(workflow, monkeypatch, capsys, error):
     assert payload['languages'][0]['trend'] is not None
     assert payload['execution']['chart_path'] is None
     assert payload['execution']['chart_error'] == {'code': 'CHART_UNAVAILABLE', 'message': str(error)}
+
+
+def test_report_path_and_combined_artifacts(workflow, monkeypatch, capsys, tmp_path):
+    chart_target = tmp_path / 'chosen.png'
+    report_target = tmp_path / 'chosen.pdf'
+    calls = []
+
+    def render_chart(result, path):
+        calls.append(('chart', result, path))
+        path.write_bytes(b'chart')
+        return path
+
+    def render_report(result, path):
+        calls.append(('report', result, path))
+        path.write_bytes(b'%PDF-test')
+        return path
+
+    monkeypatch.setattr(charts, 'render_monthly_chart', render_chart)
+    monkeypatch.setattr(report, 'render_pdf_report', render_report)
+    code, payload = invoke(capsys, BASE + ['--chart', str(chart_target), '--report', str(report_target)])
+    assert code == 0
+    assert calls == [('chart', workflow[0], chart_target), ('report', workflow[0], report_target)]
+    assert payload['execution']['chart_path'] == str(chart_target)
+    assert payload['execution']['report_path'] == str(report_target)
+    assert payload['execution']['chart_error'] is payload['execution']['report_error'] is None
+
+
+@pytest.mark.parametrize('error', [ValueError('Cannot compose report'), OSError('Cannot write report'),
+                                   RuntimeError('Renderer failed')])
+def test_report_failure_preserves_research(workflow, monkeypatch, capsys, error):
+    def render(*args):
+        raise error
+    monkeypatch.setattr(report, 'render_pdf_report', render)
+    code, payload = invoke(capsys, BASE + ['--report', 'report.pdf'])
+    assert code == 0
+    assert payload['languages'][0]['trend'] is not None
+    assert payload['execution']['report_path'] is None
+    assert payload['execution']['report_error'] == {'code': 'REPORT_UNAVAILABLE', 'message': str(error)}
 
 
 @pytest.mark.parametrize('extra', [

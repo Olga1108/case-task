@@ -1,10 +1,9 @@
 # Wikipedia Interest
 
 Research Wikipedia pageview attention across language editions with deterministic
-Python analysis, compact JSON evidence, and monthly PNG charts. An Agent Skill
+Python analysis, compact JSON evidence, monthly PNG charts, and one-page PDF briefs. An Agent Skill
 handles topic selection and restrained interpretation. Product scope is in
-[product_contract.md](product_contract.md). PDF reports and persistent caching are
-not implemented.
+[product_contract.md](product_contract.md). Persistent caching is not implemented.
 
 ## Local setup
 
@@ -46,6 +45,13 @@ writes a PNG at exactly that path; the parent directory must exist. Incomplete
 months are gaps, and unavailable languages are skipped. If no complete monthly
 data exists or the output cannot be written, `execution.chart_error` explains the
 failure while the research evidence remains available.
+
+To generate a shareable one-page report, add `--report ./brief.pdf`. The report
+uses the already computed source metrics, complete-month chart semantics, explicit
+limitations, and deterministic interpretation templates. Its parent directory
+must exist. `--chart` and `--report` may be used together; either artifact can fail
+without discarding the research JSON, with details in its corresponding
+`execution.*_error` field.
 
 Commands emit one strict JSON document on stdout (except human-readable `--help`).
 Shared input/API failures emit `{"error": {"code": "...", "message": "..."}}`
