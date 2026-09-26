@@ -368,15 +368,32 @@ def _langlinks(
         params = params | continuation
 
 
+def _source_mapping(source: TopicCandidate) -> LanguageMapping:
+    """Reuse one already validated source page as its own edition mapping."""
+    return LanguageMapping(
+        language=source.source_language,
+        project=_project(source.source_language),
+        status="valid",
+        article_title=source.article_title,
+        page_id=source.page_id,
+        canonical_url=source.canonical_url,
+        wikidata_id=source.wikidata_id,
+        redirect_chain=list(source.redirect_chain),
+        redirect_fragment=source.redirect_fragment,
+        warnings=list(source.warnings),
+    )
+
+
 def map_topic_languages(
     original_query: str, selected: TopicCandidate, languages: list[str], *,
     user_agent: str, timeout: float = 10.0, client: httpx.Client | None = None,
 ) -> ResolvedTopic:
     """Map an explicit selection; never search for replacement pages.
 
-    Selection is revalidated. Shared source/langlinks failures raise WikipediaError;
-    individual target failures remain in language_mappings. Official langlink URLs
-    identify editions, avoiding assumptions about exceptional Wikidata site IDs.
+    Selection is revalidated and reused directly when its own edition is requested.
+    Shared source/langlinks failures raise WikipediaError; individual target
+    failures remain in language_mappings. Official langlink URLs identify target
+    editions, avoiding assumptions about exceptional Wikidata site IDs.
     """
     _configuration(user_agent, timeout)
     _text(original_query, "Original query")
@@ -393,9 +410,13 @@ def map_topic_languages(
         if selected.status != "valid":
             raise selected.error
         qid = selected.wikidata_id
-        langlinks = _langlinks(http, selected, user_agent, timeout)
+        needs_langlinks = any(language != selected.source_language for language in languages)
+        langlinks = _langlinks(http, selected, user_agent, timeout) if needs_langlinks else {}
         mappings = []
         for language, project in zip(languages, projects):
+            if language == selected.source_language:
+                mappings.append(_source_mapping(selected))
+                continue
             mapping = LanguageMapping(language, project, "LANGUAGE_SITELINK_MISSING")
             try:
                 link = langlinks.get(language)

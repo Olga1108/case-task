@@ -58,10 +58,10 @@ def validate(payload, title="Fasting"):
         return validate_topic_candidate(title, "en", user_agent=UA, client=client)
 
 
-def mapping(responses, languages=("pl", "cs")):
+def mapping(responses, languages=("pl", "cs"), candidate=None):
     calls = []
     with httpx.Client(transport=transport(responses, calls)) as client:
-        result = map_topic_languages("intermittent fasting", selected(), list(languages),
+        result = map_topic_languages("intermittent fasting", candidate or selected(), list(languages),
                                      user_agent=UA, client=client)
         assert not client.is_closed
     assert not responses
@@ -160,6 +160,88 @@ def test_two_languages_map_same_identity():
     assert calls[1].url.params["llprop"] == "url"
     assert calls[1].url.params["lllimit"] == "max"
     assert all(call.url.host != "www.wikidata.org" for call in calls)
+
+
+def test_source_only_reuses_redirected_canonical_page_without_langlinks():
+    source = TopicCandidate("en", "BTC", wikidata_id="Q131723", status="valid")
+    validated = page("Bitcoin", "Q131723", "en")
+    validated["query"]["redirects"] = [{"from": "BTC", "to": "Bitcoin"}]
+
+    result, calls = mapping([validated], ("en",), source)
+
+    assert result.status == "resolved"
+    mapped, = result.language_mappings
+    assert (mapped.language, mapped.project, mapped.status) == (
+        "en", "en.wikipedia.org", "valid",
+    )
+    assert mapped.article_title == "Bitcoin"
+    assert mapped.wikidata_id == result.wikidata_id == "Q131723"
+    assert mapped.redirect_chain == ["BTC", "Bitcoin"]
+    assert len(calls) == 1
+    assert calls[0].url.params["titles"] == "BTC"
+    assert calls[0].url.params["prop"] == "pageprops|info"
+
+
+@pytest.mark.parametrize("languages", [("en", "es"), ("es", "en")])
+def test_bitcoin_source_reuse_and_target_langlink_preserve_requested_order(languages):
+    source = TopicCandidate("en", "Bitcoin", wikidata_id="Q131723", status="valid")
+    links = langlinks(("es",), title="Bitcoin")
+    link = links["query"]["pages"][0]["langlinks"][0]
+    link.update(title="Bitcoin", url="https://es.wikipedia.org/wiki/Bitcoin")
+
+    result, calls = mapping([
+        page("Bitcoin", "Q131723", "en"), links,
+        page("Bitcoin", "Q131723", "es"),
+    ], languages, source)
+
+    assert result.status == "resolved"
+    assert [item.language for item in result.language_mappings] == list(languages)
+    mapped = {item.language: item for item in result.language_mappings}
+    assert mapped["en"].article_title == "Bitcoin"
+    assert mapped["en"].wikidata_id == "Q131723"
+    assert mapped["es"].article_title == "Bitcoin"
+    assert mapped["es"].wikidata_id == "Q131723"
+    assert [(call.url.host, call.url.params.get("prop")) for call in calls] == [
+        ("en.wikipedia.org", "pageprops|info"),
+        ("en.wikipedia.org", "langlinks"),
+        ("es.wikipedia.org", "pageprops|info"),
+    ]
+    assert sum(call.url.params.get("prop") == "langlinks" for call in calls) == 1
+    assert all("srsearch" not in call.url.params for call in calls)
+    assert all(call.url.host != "www.wikidata.org" for call in calls)
+
+
+def test_source_stays_valid_when_target_langlink_is_missing():
+    source = TopicCandidate("en", "Bitcoin", wikidata_id="Q131723", status="valid")
+    result, calls = mapping([
+        page("Bitcoin", "Q131723", "en"), langlinks((), title="Bitcoin"),
+    ], ("en", "xx"), source)
+
+    assert result.status == "partial"
+    english, missing = result.language_mappings
+    assert english.status == "valid"
+    assert english.article_title == "Bitcoin"
+    assert english.wikidata_id == "Q131723"
+    assert missing.status == "LANGUAGE_SITELINK_MISSING"
+    assert missing.error.code == "LANGUAGE_SITELINK_MISSING"
+    assert len(calls) == 2
+
+
+def test_source_stays_valid_when_target_qid_mismatches():
+    source = TopicCandidate("en", "Bitcoin", wikidata_id="Q131723", status="valid")
+    links = langlinks(("es",), title="Bitcoin")
+    link = links["query"]["pages"][0]["langlinks"][0]
+    link.update(title="Bitcoin", url="https://es.wikipedia.org/wiki/Bitcoin")
+    result, _ = mapping([
+        page("Bitcoin", "Q131723", "en"), links,
+        page("Bitcoin", "Q999", "es"),
+    ], ("en", "es"), source)
+
+    assert result.status == "partial"
+    english, spanish = result.language_mappings
+    assert english.status == "valid"
+    assert spanish.status == "TOPIC_MAPPING_MISMATCH"
+    assert spanish.error.code == "TOPIC_MAPPING_MISMATCH"
 
 
 def test_czech_and_ukrainian_langlinks_validate_localized_titles_in_requested_order():

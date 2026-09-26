@@ -13,6 +13,7 @@ from reportlab.pdfgen.canvas import Canvas
 
 from wikipedia_interest.charts import build_monthly_figure
 from wikipedia_interest.models import LanguageResearchResult, ResearchResult
+from wikipedia_interest.presentation import build_direction_summary
 
 
 _FONT = "WikipediaInterestSans"
@@ -68,31 +69,6 @@ def _sign(value: float | None) -> int | None:
     if value is None:
         return None
     return 1 if value > 0 else -1 if value < 0 else 0
-
-
-def _direction(language: LanguageResearchResult) -> str:
-    """Describe evidence agreement without invented classification thresholds."""
-    if language.analysis is None:
-        return "Direction unavailable: no analyzed source series."
-    yoy = language.analysis.growth.latest_3m_yoy.value
-    trend = language.analysis.trend.normalized_theil_sen_slope
-    yoy_sign, trend_sign = _sign(yoy), _sign(trend)
-    if yoy_sign is None:
-        return "Direction inconclusive: latest-3m YoY is unavailable."
-    if trend_sign is None:
-        return "Direction inconclusive: robust trend is unavailable."
-    sensitivity = language.analysis.sensitivity
-    if sensitivity.excluded_dates:
-        after_sign = _sign(sensitivity.after.normalized_theil_sen_slope)
-        if after_sign is None or after_sign != trend_sign:
-            return "Direction inconclusive: anomaly sensitivity does not support the headline trend."
-    if yoy_sign == trend_sign == 1:
-        return "Recent YoY and robust long-range trend are both positive."
-    if yoy_sign == trend_sign == -1:
-        return "Recent YoY and robust long-range trend are both negative."
-    if yoy_sign == trend_sign == 0:
-        return "Recent YoY and robust long-range trend are both flat."
-    return "Recent YoY and robust long-range trend point in different directions."
 
 
 def _completeness(language: LanguageResearchResult) -> str:
@@ -242,7 +218,8 @@ def render_pdf_report(result: ResearchResult, output_path: Path) -> Path:
         _text_fit(canvas, _yoy(language), columns[2], row_y - 10,
                   columns[3] - columns[2] - 5, size=5.2)
         _text(canvas, _trend(language), columns[3], row_y - 10, size=6.7)
-        _text(canvas, _fit(_direction(language), 88), columns[0] + 4, row_y - 23,
+        direction = build_direction_summary(language)["summary"]
+        _text(canvas, _fit(direction, 88), columns[0] + 4, row_y - 23,
               size=6.3, color=_MUTED)
         note = _sensitivity_note(language)
         if note and row_h >= 42:
@@ -254,7 +231,10 @@ def render_pdf_report(result: ResearchResult, output_path: Path) -> Path:
     canvas.roundRect(margin, section_y - 50, page_width - 2 * margin, 50, 5, fill=1, stroke=0)
     _text(canvas, "RESTRAINED INTERPRETATION", margin + 10, section_y - 14,
           size=7.2, bold=True, color=_BLUE)
-    interpretations = " ".join(f"{language.language.upper()}: {_direction(language)}" for language in languages)
+    interpretations = " ".join(
+        f"{language.language.upper()}: {build_direction_summary(language)['summary']}"
+        for language in languages
+    )
     _draw_wrapped(canvas, interpretations or "No language evidence is available.",
                   margin + 10, section_y - 28, 119, size=6.8, leading=8.5, max_lines=2)
 

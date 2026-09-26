@@ -33,8 +33,9 @@ def topic(*mappings):
                          list(mappings), ['Topic warning'])
 
 
-def payload(language, missing=(), views=10):
-    return {'items': [dict(project=f'{language}.wikipedia', article=f'Canonical_{language}',
+def payload(language, missing=(), views=10, article=None):
+    article = (article or f'Canonical {language}').replace(' ', '_')
+    return {'items': [dict(project=f'{language}.wikipedia', article=article,
                            access='all-access', agent='user', granularity='daily',
                            timestamp=f'202601{day:02d}00', views=views)
                       for day in range(1, 32) if day not in missing]}
@@ -93,6 +94,25 @@ def test_two_languages_keep_order_and_inputs_unchanged():
     result.languages[0].warnings.append('Result-only warning')
     result.warnings.append('Result-only warning')
     assert resolved == original
+
+
+def test_source_and_target_canonical_titles_reach_pageviews_in_order():
+    source, target = mapping('en'), mapping('es')
+    source.article_title = 'Bitcoin'
+    target.article_title = 'Bitcoin (moneda)'
+    resolved = topic(source, target)
+
+    result, calls = run(resolved, [
+        payload('en', article='Bitcoin'),
+        payload('es', article='Bitcoin (moneda)'),
+    ])
+
+    assert [language.language for language in result.languages] == ['en', 'es']
+    assert [language.pageviews.request.article_title for language in result.languages] == [
+        'Bitcoin', 'Bitcoin (moneda)',
+    ]
+    assert '/en.wikipedia.org/' in calls[0].url.path
+    assert '/es.wikipedia.org/' in calls[1].url.path
 
 
 def test_intermittent_fasting_czech_valid_polish_missing():

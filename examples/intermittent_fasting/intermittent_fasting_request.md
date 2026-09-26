@@ -1,0 +1,1 @@
+Compare Wikipedia attention for intermittent fasting in Czech and Ukrainian over the last 24 complete months. Tell me what the evidence suggests for an early B2C product hypothesis, and create a one-page PDF brief.

@@ -1,6 +1,92 @@
-"""Compact evidence only: no new analytics or interpretation."""
+"""Compact evidence plus shared deterministic direction interpretation."""
 
-from wikipedia_interest.models import GrowthComparison, ResearchResult
+from typing import Literal, TypedDict
+
+from wikipedia_interest.models import GrowthComparison, LanguageResearchResult, ResearchResult
+
+
+DirectionStatus = Literal[
+    "positive", "negative", "flat", "mixed", "inconclusive", "unavailable",
+]
+
+
+class DirectionSummary(TypedDict):
+    status: DirectionStatus
+    summary: str
+
+
+def _sign(value: float | None) -> int | None:
+    if value is None:
+        return None
+    return 1 if value > 0 else -1 if value < 0 else 0
+
+
+def _long_range_description(sign: int | None) -> str:
+    return {
+        1: "positive",
+        -1: "negative",
+        0: "flat",
+        None: "unavailable",
+    }[sign]
+
+
+def build_direction_summary(language: LanguageResearchResult) -> DirectionSummary:
+    """Return the report's deterministic direction conclusion without mutation."""
+    if language.analysis is None:
+        return {
+            "status": "unavailable",
+            "summary": "Direction unavailable: no analyzed source series.",
+        }
+
+    analysis = language.analysis
+    yoy_sign = _sign(analysis.growth.latest_3m_yoy.value)
+    trend_sign = _sign(analysis.trend.normalized_theil_sen_slope)
+    if yoy_sign is None:
+        long_range = _long_range_description(trend_sign)
+        return {
+            "status": "inconclusive",
+            "summary": (
+                "Recent direction is inconclusive because latest-3m YoY is unavailable; "
+                f"long-range trend is {long_range}."
+            ),
+        }
+    if trend_sign is None:
+        return {
+            "status": "inconclusive",
+            "summary": "Direction inconclusive: robust trend is unavailable.",
+        }
+
+    sensitivity = analysis.sensitivity
+    if sensitivity.excluded_dates:
+        after_sign = _sign(sensitivity.after.normalized_theil_sen_slope)
+        if after_sign is None or after_sign != trend_sign:
+            return {
+                "status": "inconclusive",
+                "summary": (
+                    "Direction inconclusive: anomaly sensitivity does not support "
+                    "the headline trend."
+                ),
+            }
+
+    if yoy_sign == trend_sign == 1:
+        return {
+            "status": "positive",
+            "summary": "Recent YoY and robust long-range trend are both positive.",
+        }
+    if yoy_sign == trend_sign == -1:
+        return {
+            "status": "negative",
+            "summary": "Recent YoY and robust long-range trend are both negative.",
+        }
+    if yoy_sign == trend_sign == 0:
+        return {
+            "status": "flat",
+            "summary": "Recent YoY and robust long-range trend are both flat.",
+        }
+    return {
+        "status": "mixed",
+        "summary": "Recent YoY and robust long-range trend point in different directions.",
+    }
 
 
 def _comparison(value: GrowthComparison) -> dict:
@@ -50,6 +136,7 @@ def build_agent_summary(result: ResearchResult) -> dict:
             "language": language.language, "project": language.project,
             "article": language.article_title, "mapping_status": language.mapping_status,
             "workflow_status": language.status,
+            "direction": build_direction_summary(language),
             "data": None, "growth": None, "trend": None, "anomalies": None,
             "sensitivity": None, "seasonality": None,
             "warning_ids": warning_ids(language.warnings), "error": None,

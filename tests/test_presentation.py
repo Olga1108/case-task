@@ -11,7 +11,7 @@ from tests.test_analysis import series
 from tests.test_research import mapping, topic
 from wikipedia_interest.analysis import analyze_pageviews
 from wikipedia_interest.models import LanguageResearchResult, ResearchResult, WikipediaError
-from wikipedia_interest.presentation import build_agent_summary
+from wikipedia_interest.presentation import build_agent_summary, build_direction_summary
 
 
 def example(languages=('cs', 'uk'), missing=(), empty=False):
@@ -68,6 +68,7 @@ def test_success_growth_trend_and_seasonality_use_existing_evidence():
     assert item['trend']['theil_sen_slope'] == analysis.trend.theil_sen_slope
     assert item['trend']['normalized_theil_sen_slope'] == analysis.trend.normalized_theil_sen_slope
     assert item['trend']['normalization'] == 'mean monthly total_views'
+    assert item['direction'] == build_direction_summary(result.languages[0])
     assert item['seasonality']['enough_history_for_annual_comparison']
     descriptors = item['seasonality']['month_of_year']
     assert [d['month'] for d in descriptors] == list(range(1, 13))
@@ -186,3 +187,65 @@ def test_explicit_zero_observations():
     assert item['data']['zero_day_count'] == 731
     assert item['trend']['theil_sen_slope'] == 0
     assert item['anomalies']['mad']['reason'] == 'ZERO_DISPERSION'
+
+
+@pytest.mark.parametrize('yoy,trend,status,summary', [
+    (0.2, 0.01, 'positive', 'Recent YoY and robust long-range trend are both positive.'),
+    (-0.2, -0.01, 'negative', 'Recent YoY and robust long-range trend are both negative.'),
+    (0.0, 0.0, 'flat', 'Recent YoY and robust long-range trend are both flat.'),
+    (0.2, -0.01, 'mixed', 'Recent YoY and robust long-range trend point in different directions.'),
+])
+def test_direction_status_from_recent_yoy_and_robust_trend(yoy, trend, status, summary):
+    language = example(('cs',)).languages[0]
+    language.analysis.growth.latest_3m_yoy.value = yoy
+    language.analysis.trend.normalized_theil_sen_slope = trend
+    language.analysis.sensitivity.excluded_dates = []
+
+    assert build_direction_summary(language) == {'status': status, 'summary': summary}
+
+
+def test_missing_recent_yoy_is_inconclusive_and_keeps_long_range_separate():
+    language = example(('cs',)).languages[0]
+    language.analysis.growth.latest_3m_yoy.value = None
+    language.analysis.trend.normalized_theil_sen_slope = -0.01
+
+    assert build_direction_summary(language) == {
+        'status': 'inconclusive',
+        'summary': ('Recent direction is inconclusive because latest-3m YoY is unavailable; '
+                    'long-range trend is negative.'),
+    }
+
+
+def test_missing_robust_trend_is_inconclusive():
+    language = example(('cs',)).languages[0]
+    language.analysis.growth.latest_3m_yoy.value = 0.2
+    language.analysis.trend.normalized_theil_sen_slope = None
+
+    assert build_direction_summary(language) == {
+        'status': 'inconclusive',
+        'summary': 'Direction inconclusive: robust trend is unavailable.',
+    }
+
+
+def test_anomaly_sensitivity_sign_disagreement_is_inconclusive():
+    language = example(('cs',)).languages[0]
+    language.analysis.growth.latest_3m_yoy.value = 0.2
+    language.analysis.trend.normalized_theil_sen_slope = 0.01
+    language.analysis.sensitivity.excluded_dates = [date(2025, 6, 1)]
+    language.analysis.sensitivity.after.normalized_theil_sen_slope = -0.01
+
+    assert build_direction_summary(language) == {
+        'status': 'inconclusive',
+        'summary': ('Direction inconclusive: anomaly sensitivity does not support '
+                    'the headline trend.'),
+    }
+
+
+def test_no_analysis_direction_is_unavailable_in_compact_json():
+    result = example(('cs',))
+    result.languages[0].analysis = None
+
+    assert build_agent_summary(result)['languages'][0]['direction'] == {
+        'status': 'unavailable',
+        'summary': 'Direction unavailable: no analyzed source series.',
+    }

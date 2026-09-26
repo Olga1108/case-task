@@ -13,9 +13,10 @@ fixtures. No analytics formulas or implementation are specified here.
 **Recommendation:** retrieve daily observations for each selected article, retain
 them for follow-up questions, and present complete calendar months. Start topic
 discovery with Wikipedia search in the query's language, retain the selected
-page's Wikidata Q-ID as the identity boundary, and use its source-page langlinks
-to propose requested-edition targets for Q-ID validation. Keep selection evidence
-and per-language failures visible.
+page's Wikidata Q-ID as the identity boundary, reuse that validated page directly
+when its own edition is requested, and use its source-page langlinks to propose
+other requested-edition targets for Q-ID validation. Keep selection evidence and
+per-language failures visible.
 
 The most consequential documented limitations are title-based traffic attribution
 and ambiguous missing data: resolving a redirect does not merge its views into the
@@ -240,10 +241,12 @@ returns interlanguage-link language codes, titles, and URLs. `lllang` filters on
 language only; `llcontinue` is returned when another response is needed.
 [Official langlinks help](https://www.mediawiki.org/wiki/API:Langlinks).
 
-**Recommendation:** retrieve source-page langlinks once, filter the explicitly
-requested languages, and validate every returned target article independently.
-The target's `pageprops.wikibase_item` must equal the already validated source
-Q-ID; langlinks supplies a candidate target title, not the identity decision.
+**Recommendation:** reuse the already validated source page directly when its own
+edition is requested. For requested non-source editions, retrieve source-page
+langlinks once, filter the requested languages, and validate every returned target
+article independently. The target's `pageprops.wikibase_item` must equal the
+already validated source Q-ID; langlinks supplies a candidate target title, not the
+identity decision. Skip the langlinks request when no non-source edition is requested.
 
 ### Recommended MVP resolution strategy
 
@@ -259,9 +262,10 @@ The following is a **proposed technical strategy**, not final Agent Skill instru
 3. Select a supported concept using the user's meaning, candidate descriptions
    and snippets. Record the selected identifier and reason. Do not equate first
    search rank, exact text match, or greatest traffic with semantic certainty.
-4. Retrieve the validated source page's language links. Resolve and validate each
-   requested target locally against the source Q-ID before requesting traffic.
-   Return every requested language's status.
+4. Reuse the validated source page for a requested source edition. If non-source
+   editions are requested, retrieve the source page's language links once, then
+   resolve and validate each target locally against the source Q-ID before requesting
+   traffic. Return every requested language's status in its original order.
 5. If Wikipedia discovery is inadequate, offer Wikidata search candidates as a
    fallback. Do not silently replace missing langlinks with independently searched
    near-matches or translated titles.
@@ -312,10 +316,11 @@ Flag differing coverage described in candidate context. Reject section redirects
 or broader-page substitutions for automatic article-level comparison: the target's
 whole-page traffic would not measure that narrower concept.
 
-**Recommendation:** if a requested language code is absent from the source langlinks, return
-`LANGUAGE_SITELINK_MISSING`, not zero interest. Existing mapped languages may remain
-usable, but the requested comparison is incomplete. If the source page lacks a
-Q-ID, return a candidate-level issue instead of fabricating a cross-language match.
+**Recommendation:** if a requested non-source language code is absent from the
+source langlinks, return `LANGUAGE_SITELINK_MISSING`, not zero interest. The
+validated source edition and other mapped languages may remain usable, but the
+requested comparison is incomplete. If the source page lacks a Q-ID, return a
+candidate-level issue instead of fabricating a cross-language match.
 
 **MVP coverage proposal:** query the validated current title only and always expose
 `title_coverage=current_canonical_only` plus an alias/history warning. Known moves

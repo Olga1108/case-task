@@ -7,6 +7,7 @@ import pytest
 from pypdf import PdfReader
 
 from tests.test_presentation import example
+from wikipedia_interest.presentation import build_agent_summary
 from wikipedia_interest.report import render_pdf_report
 
 
@@ -43,9 +44,26 @@ def test_missing_yoy_is_unavailable_not_zero(tmp_path):
     result = example(("cs",), missing=[date(2025, 12, 15)])
     target = tmp_path / "missing-yoy.pdf"
     render_pdf_report(result, target)
-    text = pdf_text(target)
+    text = " ".join(pdf_text(target).split())
+    direction = build_agent_summary(result)["languages"][0]["direction"]
     assert "Unavailable: missing or incomplete months" in text
-    assert "Direction inconclusive: latest-3m YoY is unavailable." in text
+    assert direction["status"] == "inconclusive"
+    assert direction["summary"] in text
+
+
+def test_pdf_and_compact_json_share_negative_direction_wording(tmp_path):
+    result = example(("cs",))
+    analysis = result.languages[0].analysis
+    analysis.growth.latest_3m_yoy.value = -0.2
+    analysis.trend.normalized_theil_sen_slope = -0.01
+    analysis.sensitivity.excluded_dates = []
+    direction = build_agent_summary(result)["languages"][0]["direction"]
+    target = tmp_path / "negative.pdf"
+
+    render_pdf_report(result, target)
+
+    assert direction["status"] == "negative"
+    assert direction["summary"] in " ".join(pdf_text(target).split())
 
 
 @pytest.mark.parametrize("empty,partial", [(True, False), (False, True)])
