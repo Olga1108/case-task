@@ -1,5 +1,9 @@
 ## Evaluation result
 
+## User prompt
+
+Compare Wikipedia attention for Bitcoin in English and Spanish over the last 24 complete months. Tell me what the evidence suggests for an early B2C fintech product hypothesis, and create a one-page PDF brief.
+
 **PARTIAL — mapping regression fixed successfully**
 
 The previous source-language mapping bug was resolved.

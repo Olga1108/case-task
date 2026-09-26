@@ -1,1 +1,0 @@
-This directory contains small end-to-end examples. For full regression datasets, see evaluation/datasets/.

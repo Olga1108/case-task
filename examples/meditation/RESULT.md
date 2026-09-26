@@ -1,5 +1,9 @@
 ## Evaluation result
 
+## User prompt
+
+Compare Wikipedia attention for meditation in Polish and German over the last 24 complete months. Tell me what the evidence suggests for an early B2C wellness product hypothesis, and create a one-page PDF brief.
+
 **PASS**
 
 The skill generalized successfully to a different topic and different language editions.
