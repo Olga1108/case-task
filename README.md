@@ -11,7 +11,8 @@ Requires Git and Python 3.12+. Clone the repository, create a virtual environmen
 and install the package with its development dependencies:
 
 ```sh
-git clone https://github.com/Olga1108/case-task.git wikipedia-interest-research
+git clone this repo
+git wikipedia-interest-research
 cd wikipedia-interest-research
 python3 -m venv .venv
 source .venv/bin/activate
